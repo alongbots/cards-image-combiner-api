@@ -4,8 +4,13 @@ import requests
 import io
 import tempfile
 import os
+from flask_cors import CORS
 
+# Enable CORS for all routes
 app = Flask(__name__)
+
+# Enable CORS for all routes
+CORS(app)
 
 # Path to the background image
 BACKGROUND_IMAGE_PATH = "./Background_image/Ronen-botss.jpg"
@@ -77,7 +82,7 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
 
     return grid_image
 
-@app.route('/combine-images', methods=['GET'])
+@app.route('/api/combine-images', methods=['GET'])
 def combine_images():
     """API endpoint to combine images into a grid."""
     image_urls = [request.args.get(f'pic{i}') for i in range(1, 13)]
