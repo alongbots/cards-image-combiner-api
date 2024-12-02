@@ -2,11 +2,8 @@
     "version": 2,
     "builds": [
       {
-        "src": "/api/combine-images.py",
-        "use": "@vercel/python",
-        "config": {
-          "pythonVersion": "3.10"
-        }
+        "src": "api/combine-images.py",
+        "use": "@vercel/python"
       }
     ],
     "routes": [
