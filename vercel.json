@@ -2,14 +2,17 @@
     "version": 2,
     "builds": [
       {
-        "src": "api/main.py",
-        "use": "@vercel/python"
+        "src": "main.py",
+        "use": "@vercel/python",
+        "config": {
+          "pythonVersion": "3.10"
+        }
       }
     ],
     "routes": [
       {
         "src": "/api/(.*)",
-        "dest": "/api/main.py"
+        "dest": "/main.py"
       }
     ]
   }
