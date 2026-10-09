@@ -1,402 +1,201 @@
-
 from flask import Flask, request, send_file
-from PIL import Image, ImageOps, ImageFile
-from flask_cors import CORS
-from urllib.parse import urlparse, urljoin
-from urllib.request import url2pathname
+from PIL import Image
 import requests
 import io
+import tempfile
 import os
 import cv2
-import socket
-import ipaddress
-import tempfile
 import numpy as np
+import re
+import urllib.request
+import urllib3
+from flask_cors import CORS
+
+# Suppress insecure request warnings for URLs with broken SSL certificates
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Optional but highly recommended: Support for AVIF and HEIC formats (Apple/Modern Web)
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except ImportError:
+    pass
 
 app = Flask(__name__)
 CORS(app)
 
-# ---------------- CONFIGURATION ----------------
-
+# Configuration
 BACKGROUND_IMAGE_PATH = "./Background_image/ALONGBOTS.jpg"
-
+SPACING_PX = 20
+HORIZONTAL_SPACING_PX = 14
+VERTICAL_SPACING_PX = SPACING_PX
 IMAGE_WIDTH_PX = 576
 IMAGE_HEIGHT_PX = 756
-HORIZONTAL_SPACING_PX = 14
-VERTICAL_SPACING_PX = 20
 
-MAX_IMAGES = 12
-MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024  # 20 MB per URL
-MAX_URL_LENGTH = 4096
-REQUEST_TIMEOUT = (5, 15)
-
-# Pillow can load truncated files when explicitly enabled.
-# Leave this disabled for safer, predictable decoding.
-ImageFile.LOAD_TRUNCATED_IMAGES = False
-
+# Realistic Browser Headers to bypass anti-bot blocks
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "image/avif,image/webp,image/apng,image/svg+xml,"
-        "image/*,video/*;q=0.9,*/*;q=0.8"
-    ),
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://google.com/'
 }
 
-IMAGE_EXTENSIONS = (
-    ".jpg", ".jpeg", ".png", ".webp", ".bmp",
-    ".gif", ".tif", ".tiff", ".ico", ".avif", ".jfif"
-)
-
-VIDEO_EXTENSIONS = (
-    ".mp4", ".webm", ".mov", ".avi", ".m4v",
-    ".mkv", ".mpeg", ".mpg", ".3gp", ".ogv"
-)
-
-# ---------------- URL VALIDATION ----------------
-
-def validate_public_url(url):
-    """Allow HTTP(S) URLs while blocking private/local destinations."""
-    if not url or len(url) > MAX_URL_LENGTH:
-        raise ValueError("Invalid or excessively long URL")
-
-    parsed = urlparse(url)
-
-    if parsed.scheme.lower() not in ("http", "https"):
-        raise ValueError("Only HTTP and HTTPS URLs are supported")
-
-    if not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("Invalid URL or embedded credentials")
-
-    hostname = parsed.hostname
-
-    # Block local hostnames.
-    if hostname.lower() in ("localhost", "localhost.localdomain"):
-        raise ValueError("Local hosts are not allowed")
+def extract_frame_from_video(video_content):
+    """Saves video to a temp file and extracts the first frame using OpenCV."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_video:
+        temp_video.write(video_content)
+        temp_video_path = temp_video.name
 
     try:
-        addresses = socket.getaddrinfo(
-            hostname,
-            parsed.port or (443 if parsed.scheme == "https" else 80),
-            type=socket.SOCK_STREAM,
-        )
+        vidcap = cv2.VideoCapture(temp_video_path)
+        success, image = vidcap.read()
+        vidcap.release()
 
-        if not addresses:
-            raise ValueError("Hostname could not be resolved")
-
-        for address in addresses:
-            ip = ipaddress.ip_address(address[4][0])
-
-            if (
-                not ip.is_global
-                or ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_multicast
-                or ip.is_reserved
-                or ip.is_unspecified
-            ):
-                raise ValueError("Private or restricted network address")
-
-    except socket.gaierror:
-        raise ValueError("Could not resolve hostname")
-
-    return url
-
-
-# ---------------- DOWNLOAD CONTENT ----------------
-
-def download_content(url):
-    """
-    Download content with redirect checks, a timeout,
-    and a maximum response size.
-    """
-    current_url = url
-
-    with requests.Session() as session:
-        session.headers.update(HEADERS)
-
-        for _ in range(6):
-            validate_public_url(current_url)
-
-            response = session.get(
-                current_url,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=False,
-                stream=True,
-            )
-
-            try:
-                if response.is_redirect or response.is_permanent_redirect:
-                    location = response.headers.get("Location")
-
-                    if not location:
-                        raise ValueError("Redirect has no destination")
-
-                    current_url = urljoin(current_url, location)
-                    continue
-
-                response.raise_for_status()
-
-                content_length = response.headers.get("Content-Length")
-                if content_length:
-                    try:
-                        if int(content_length) > MAX_DOWNLOAD_BYTES:
-                            raise ValueError("File exceeds size limit")
-                    except ValueError as exc:
-                        if str(exc) == "File exceeds size limit":
-                            raise
-
-                chunks = []
-                total = 0
-
-                for chunk in response.iter_content(64 * 1024):
-                    if not chunk:
-                        continue
-
-                    total += len(chunk)
-
-                    if total > MAX_DOWNLOAD_BYTES:
-                        raise ValueError("File exceeds size limit")
-
-                    chunks.append(chunk)
-
-                content = b"".join(chunks)
-                content_type = response.headers.get(
-                    "Content-Type", ""
-                ).split(";")[0].strip().lower()
-
-                return content, content_type, current_url
-
-            finally:
-                response.close()
-
-        raise ValueError("Too many redirects")
-
-
-# ---------------- VIDEO FRAME EXTRACTION ----------------
-
-def extract_video_frame(content):
-    """Extract the first readable frame from a supported video."""
-    temp_path = None
-    capture = None
-
-    try:
-        with tempfile.NamedTemporaryFile(
-            suffix=".video", delete=False
-        ) as temp:
-            temp.write(content)
-            temp_path = temp.name
-
-        capture = cv2.VideoCapture(temp_path)
-
-        if not capture.isOpened():
-            return None
-
-        success, frame = capture.read()
-
-        if not success or frame is None:
-            return None
-
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        return Image.fromarray(frame)
-
-    except Exception as exc:
-        print("Video decode error:", exc)
-        return None
-
+        if success:
+            # Convert BGR (OpenCV) to RGB (PIL)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(image)
+    except Exception as e:
+        print(f"Error processing video frame: {e}")
     finally:
-        if capture is not None:
-            capture.release()
-
-        if temp_path and os.path.exists(temp_path):
+        if os.path.exists(temp_video_path):
             try:
-                os.remove(temp_path)
-            except OSError:
+                os.remove(temp_video_path)
+            except Exception:
                 pass
+    return None
 
-
-# ---------------- IMAGE DECODING ----------------
-
-def decode_image(content):
-    """
-    Decode an image based on its actual file contents,
-    not just its extension or the server's Content-Type.
-    """
+def process_image_bytes(content):
+    """Safely opens image bytes using PIL, handling GIFs and Transparency."""
     try:
-        with Image.open(io.BytesIO(content)) as source:
-            # GIF and animated image formats become a static first frame.
-            source.seek(0)
-            frame = ImageOps.exif_transpose(source.copy())
-            frame.load()
+        img = Image.open(io.BytesIO(content))
+        
+        # If it's a GIF or animated format, make sure we are on the first frame
+        if getattr(img, "is_animated", False):
+            img.seek(0)
 
-            # Handle transparency against a white background.
-            if frame.mode in ("RGBA", "LA") or (
-                frame.mode == "P" and "transparency" in frame.info
-            ):
-                frame = frame.convert("RGBA")
-                white = Image.new("RGBA", frame.size, "white")
-                white.alpha_composite(frame)
-                frame = white.convert("RGB")
-            else:
-                frame = frame.convert("RGB")
-
-            return frame
-
-    except Exception:
-        return None
-
-
-def download_and_resize_image(url):
-    """Download, decode, and resize one image or video."""
-    try:
-        content, content_type, final_url = download_content(url)
-
-        if not content:
-            raise ValueError("Downloaded file is empty")
-
-        path = urlparse(final_url).path.lower()
-
-        looks_like_video = (
-            content_type.startswith("video/")
-            or path.endswith(VIDEO_EXTENSIONS)
-        )
-
-        # Do not classify GIF as video: Pillow handles animated GIFs.
-        if looks_like_video:
-            image = extract_video_frame(content)
+        # Handle Transparency (Alpha Channel) to prevent black backgrounds
+        if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+            img = img.convert('RGBA')
+            bg = Image.new('RGB', img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
         else:
-            image = decode_image(content)
-
-        # Some hosts report an incorrect MIME type.
-        # Try image decoding if video decoding did not work.
-        if image is None:
-            image = decode_image(content)
-
-        if image is None:
-            raise ValueError(
-                "Unsupported format, corrupt file, or unreadable content"
-            )
-
-        # Keep the original proportions and fit within the card dimensions.
-        image = ImageOps.fit(
-            image,
-            (IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX),
-            method=Image.Resampling.LANCZOS,
-            centering=(0.5, 0.5),
-        )
-
-        return image
-
-    except Exception as exc:
-        print(f"Skipping URL {url!r}: {exc}")
+            img = img.convert('RGB')
+            
+        return img
+    except Exception as e:
+        print(f"PIL Failed to process image bytes: {e}")
         return None
 
+def download_and_resize_image(url, depth=0):
+    """Download an image, HTML meta-image, base64 URI, or video frame and resize it."""
+    # Prevent infinite redirects on malicious/circular links
+    if depth > 2:
+        return None
 
-# ---------------- GRID GENERATION ----------------
+    try:
+        # 1. Handle Base64 Data URIs directly
+        if url.startswith('data:'):
+            with urllib.request.urlopen(url) as response:
+                content = response.read()
+            img = process_image_bytes(content)
+            if img:
+                return img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
+            return None
 
-def create_image_grid(
-    image_urls,
-    rows,
-    cols,
-    horizontal_spacing,
-    vertical_spacing,
-):
-    total_width = (
-        cols * IMAGE_WIDTH_PX
-        + (cols - 1) * horizontal_spacing
-    )
-    total_height = (
-        rows * IMAGE_HEIGHT_PX
-        + (rows - 1) * vertical_spacing
-    )
+        # 2. Fetch the URL (verify=False helps bypass SSL blocks)
+        response = requests.get(url, headers=HEADERS, stream=True, timeout=15, allow_redirects=True, verify=False)
+        response.raise_for_status()
 
+        content_type = response.headers.get('Content-Type', '').lower()
+        content = response.content
+
+        # 3. Handle HTML pages (Extract image from standard links like Imgur or websites)
+        if 'text/html' in content_type:
+            html_content = content.decode('utf-8', errors='ignore')
+            # Look for the OpenGraph image tag (<meta property="og:image" content="...">)
+            match = re.search(r'<meta\s+(?:property|name)=[\'"]og:image[\'"]\s+content=[\'"]([^\'"]+)[\'"]', html_content, re.IGNORECASE)
+            if match:
+                og_url = match.group(1)
+                # Recursively download the actual extracted image
+                return download_and_resize_image(og_url, depth=depth+1)
+
+        # 4. Determine if it's a video (GIFs are deliberately excluded so PIL handles them)
+        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v', '.mkv', '.wmv')
+        is_video = 'video' in content_type or url.lower().split('?')[0].endswith(video_extensions)
+
+        img = None
+        
+        # Route 1: Try as Video First
+        if is_video:
+            img = extract_frame_from_video(content)
+            
+        # Route 2: Try as Standard Image (JPG, PNG, GIF, WEBP)
+        if img is None:
+            img = process_image_bytes(content)
+            
+        # Route 3: Deep Fallback - if PIL failed, maybe it's a mislabeled video file
+        if img is None and not is_video:
+            img = extract_frame_from_video(content)
+
+        # Finalize and Resize
+        if img:
+            return img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
+
+    except Exception as e:
+        print(f"Error downloading or processing {url}: {e}")
+        
+    return None
+
+def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spacing):
+    total_width = cols * IMAGE_WIDTH_PX + (cols - 1) * horizontal_spacing
+    total_height = rows * IMAGE_HEIGHT_PX + (rows - 1) * vertical_spacing
+
+    # Try to load background, otherwise create a white one
     try:
         if os.path.exists(BACKGROUND_IMAGE_PATH):
-            with Image.open(BACKGROUND_IMAGE_PATH) as source:
-                background = source.convert("RGB").resize(
-                    (total_width, total_height),
-                    Image.Resampling.LANCZOS,
-                )
+            background = Image.open(BACKGROUND_IMAGE_PATH).convert('RGB')
+            background = background.resize((total_width, total_height))
         else:
-            background = Image.new(
-                "RGB", (total_width, total_height), "white"
-            )
-    except Exception as exc:
-        print("Background loading error:", exc)
-        background = Image.new(
-            "RGB", (total_width, total_height), "white"
-        )
+            background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+    except Exception:
+        background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
 
-    loaded = 0
+    grid_image = background
 
-    for idx, url in enumerate(image_urls[:rows * cols]):
-        image = download_and_resize_image(url)
+    for idx, url in enumerate(image_urls):
+        if idx >= rows * cols:
+            break
+        
+        img = download_and_resize_image(url)
+        if img:
+            row, col = divmod(idx, cols)
+            x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
+            y_offset = row * (IMAGE_HEIGHT_PX + vertical_spacing)
+            grid_image.paste(img, (x_offset, y_offset))
 
-        # A bad link only leaves its own space empty.
-        if image is None:
-            continue
+    return grid_image
 
-        row, col = divmod(idx, cols)
-
-        x = col * (IMAGE_WIDTH_PX + horizontal_spacing)
-        y = row * (IMAGE_HEIGHT_PX + vertical_spacing)
-
-        background.paste(image, (x, y))
-        loaded += 1
-
-    return background, loaded
-
-
-# ---------------- API ENDPOINT ----------------
-
-@app.route("/api/combine-images", methods=["GET"])
+@app.route('/api/combine-images', methods=['GET'])
 def combine_images():
-    image_urls = [
-        request.args.get(f"pic{i}", "").strip()
-        for i in range(1, MAX_IMAGES + 1)
-    ]
-
+    # Supports up to 12 images via pic1, pic2...
+    image_urls = [request.args.get(f'pic{i}') for i in range(1, 13)]
     image_urls = [url for url in image_urls if url]
 
     if not image_urls:
-        return {"error": "No image URLs provided"}, 400
+        return "No images provided", 400
 
-    if any(len(url) > MAX_URL_LENGTH for url in image_urls):
-        return {"error": "A URL is too long"}, 400
-
+    # Grid logic: you can adjust rows/cols based on len(image_urls)
     rows, cols = 4, 3
+    grid_image = create_image_grid(image_urls, rows, cols, HORIZONTAL_SPACING_PX, VERTICAL_SPACING_PX)
 
-    grid_image, loaded = create_image_grid(
-        image_urls,
-        rows,
-        cols,
-        HORIZONTAL_SPACING_PX,
-        VERTICAL_SPACING_PX,
-    )
+    # Save to memory instead of a physical file for faster response
+    img_io = io.BytesIO()
+    grid_image.save(img_io, 'PNG')
+    img_io.seek(0)
 
-    output = io.BytesIO()
-    grid_image.save(output, format="PNG", optimize=True)
-    output.seek(0)
+    return send_file(img_io, mimetype='image/png')
 
-    response = send_file(
-        output,
-        mimetype="image/png",
-        as_attachment=False,
-        download_name="alongbots-grid.png",
-    )
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["X-Images-Loaded"] = str(loaded)
-
-    return response
-
-
-if __name__ == "__main__":
-    app.run(
-        host="0.0.0.0",
-        port=5000,
-        debug=False,
-    )
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
