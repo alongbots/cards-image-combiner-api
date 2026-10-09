@@ -3,3 +3,4 @@ flask-cors
 Pillow
 requests
 opencv-python-headless
+numpy
