@@ -5,7 +5,6 @@ import io
 import tempfile
 import os
 import cv2
-import numpy as np
 from flask_cors import CORS
 
 app = Flask(__name__)
@@ -25,10 +24,10 @@ HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
 }
 
-def extract_frame_from_video(video_content):
+def extract_frame_from_video(video_content, ext=".mp4"):
     """Saves video to a temp file and extracts the first frame."""
-    # Use delete=False because Windows often prevents opening a file that is already open
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_video:
+    # Use the proper extension from the URL so OpenCV knows how to decode it
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as temp_video:
         temp_video.write(video_content)
         temp_video_path = temp_video.name
 
@@ -50,7 +49,7 @@ def extract_frame_from_video(video_content):
     return None
 
 def download_and_resize_image(url):
-    """Download an image or video frame and resize it."""
+    """Download an image/gif or video frame, preserve transparency, and resize it."""
     try:
         # Use headers and allow redirects to handle 'any' website
         response = requests.get(url, headers=HEADERS, stream=True, timeout=10, allow_redirects=True)
@@ -59,20 +58,28 @@ def download_and_resize_image(url):
         content_type = response.headers.get('Content-Type', '').lower()
         content = response.content
 
-        # Robust check for video
-        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v', '.gif')
-        is_video = 'video' in content_type or url.lower().split('?')[0].endswith(video_extensions)
+        # Removed .gif from video_extensions because PIL handles GIFs perfectly
+        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v')
+        
+        # Extract extension to help cv2
+        url_ext = os.path.splitext(url.lower().split('?')[0])[1]
+        is_video = 'video' in content_type or url_ext in video_extensions
 
         img = None
         if is_video:
-            img = extract_frame_from_video(content)
+            ext_to_use = url_ext if url_ext in video_extensions else '.mp4'
+            img = extract_frame_from_video(content, ext_to_use)
         
-        # If not a video or video frame extraction failed, try opening as image
+        # If not a video or video frame extraction failed, try opening as an image (PNG, JPG, GIF, WebP)
         if img is None:
             img = Image.open(io.BytesIO(content))
-            # Convert to RGB (handles PNG transparency and WebP)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
+            
+            # Ensure we are at the first frame (crucial for animated GIFs / WebP)
+            img.seek(0)
+            
+            # Preserve transparency if present
+            if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+                img = img.convert("RGBA")
             else:
                 img = img.convert("RGB")
 
@@ -89,15 +96,15 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
     total_width = cols * IMAGE_WIDTH_PX + (cols - 1) * horizontal_spacing
     total_height = rows * IMAGE_HEIGHT_PX + (rows - 1) * vertical_spacing
 
-    # Try to load background, otherwise create a white one
+    # Try to load background, convert to RGBA to properly layer transparent images
     try:
         if os.path.exists(BACKGROUND_IMAGE_PATH):
-            background = Image.open(BACKGROUND_IMAGE_PATH)
+            background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
             background = background.resize((total_width, total_height))
         else:
-            background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+            background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
     except Exception:
-        background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+        background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
 
     grid_image = background
 
@@ -110,8 +117,15 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
             row, col = divmod(idx, cols)
             x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
             y_offset = row * (IMAGE_HEIGHT_PX + vertical_spacing)
-            grid_image.paste(img, (x_offset, y_offset))
+            
+            # If the image has transparency (RGBA), use itself as a mask to preserve it
+            if img.mode == 'RGBA':
+                grid_image.paste(img, (x_offset, y_offset), img)
+            else:
+                grid_image.paste(img, (x_offset, y_offset))
 
+    # Convert back to RGB right before saving if you don't need a transparent final output 
+    # (Though PNG supports RGBA, so we can leave it as RGBA)
     return grid_image
 
 @app.route('/api/combine-images', methods=['GET'])
