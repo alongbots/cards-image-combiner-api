@@ -1,6 +1,1 @@
-flask
-flask-cors
-Pillow
-requests
-opencv-python-headless
-numpy
+pip install flask flask-cors Pillow requests opencv-python-headless pillow-heif urllib3
