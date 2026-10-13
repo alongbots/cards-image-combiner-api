@@ -121,15 +121,15 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
     total_width = cols * IMAGE_WIDTH_PX + (cols - 1) * horizontal_spacing
     total_height = rows * IMAGE_HEIGHT_PX + (rows - 1) * vertical_spacing
 
-    # Try to load background, otherwise create a white one
+    # Try to load background, otherwise create a transparent one
     try:
         if os.path.exists(BACKGROUND_IMAGE_PATH):
             background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
             background = background.resize((total_width, total_height))
         else:
-            background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
+            background = Image.new("RGBA", (total_width, total_height), (0, 0, 0, 0))
     except Exception:
-        background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
+        background = Image.new("RGBA", (total_width, total_height), (0, 0, 0, 0))
 
     grid_image = background
 
@@ -142,7 +142,6 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
             row, col = divmod(idx, cols)
             x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
             y_offset = row * (IMAGE_HEIGHT_PX + vertical_spacing)
-            # Paste using the image itself as alpha mask to retain transparent corners/borders
             grid_image.paste(img, (x_offset, y_offset), img)
 
     return grid_image
