@@ -7,6 +7,9 @@ import os
 import cv2
 import numpy as np
 from flask_cors import CORS
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 CORS(app)
@@ -25,56 +28,74 @@ HEADERS = {
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
 }
 
-def extract_frame_from_video(video_content):
+def extract_frame_from_video(video_content, ext=".mp4"):
     """Saves video to a temp file and extracts the first frame."""
-    # Use delete=False because Windows often prevents opening a file that is already open
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_video:
-        temp_video.write(video_content)
-        temp_video_path = temp_video.name
+    # Try common video container extensions in case the file type is mismatched
+    for suffix in [ext, ".mp4", ".webm", ".avi", ".mov"]:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
+            temp_video.write(video_content)
+            temp_video_path = temp_video.name
 
-    try:
-        vidcap = cv2.VideoCapture(temp_video_path)
-        success, image = vidcap.read()
-        vidcap.release()
-        
-        if success:
-            # Convert BGR (OpenCV) to RGB (PIL)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            return Image.fromarray(image)
-    except Exception as e:
-        print(f"Error processing video frame: {e}")
-    finally:
-        if os.path.exists(temp_video_path):
-            os.remove(temp_video_path)
+        try:
+            vidcap = cv2.VideoCapture(temp_video_path)
+            success, image = vidcap.read()
+            vidcap.release()
+            
+            if success and image is not None:
+                # Convert BGR (OpenCV) to RGB (PIL)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                return Image.fromarray(image)
+        except Exception as e:
+            print(f"Error processing video frame: {e}")
+        finally:
+            if os.path.exists(temp_video_path):
+                os.remove(temp_video_path)
     
     return None
 
 def download_and_resize_image(url):
     """Download an image or video frame and resize it."""
     try:
-        # Use headers and allow redirects to handle 'any' website
-        response = requests.get(url, headers=HEADERS, stream=True, timeout=10, allow_redirects=True)
+        # Use headers, allow redirects, and disable strict SSL verification to handle any website
+        response = requests.get(url, headers=HEADERS, stream=True, timeout=10, allow_redirects=True, verify=False)
         response.raise_for_status()
         
         content_type = response.headers.get('Content-Type', '').lower()
         content = response.content
 
-        # Robust check for video
-        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v', '.gif')
+        # Robust check for video formats (excluding GIF which Pillow handles natively)
+        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v')
         is_video = 'video' in content_type or url.lower().split('?')[0].endswith(video_extensions)
 
         img = None
         if is_video:
-            img = extract_frame_from_video(content)
+            ext = os.path.splitext(url.lower().split('?')[0])[1] or '.mp4'
+            img = extract_frame_from_video(content, ext)
         
-        # If not a video or video frame extraction failed, try opening as image
+        # If not a video or video frame extraction failed, try opening as image via PIL
         if img is None:
-            img = Image.open(io.BytesIO(content))
-            # Convert to RGB (handles PNG transparency and WebP)
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            else:
-                img = img.convert("RGB")
+            try:
+                img = Image.open(io.BytesIO(content))
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                else:
+                    img = img.convert("RGB")
+            except Exception:
+                img = None
+
+        # Fallback to OpenCV image decoding if PIL fails
+        if img is None:
+            try:
+                nparr = np.frombuffer(content, np.uint8)
+                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if cv_img is not None:
+                    img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+            except Exception:
+                img = None
+
+        # Fallback to video frame extraction if still None (e.g., video disguised with image extension)
+        if img is None:
+            img = extract_frame_from_video(content)
 
         if img:
             resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
