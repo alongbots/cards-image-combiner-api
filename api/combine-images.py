@@ -83,17 +83,11 @@ def download_and_resize_image(url):
         content = response.content
         img = None
 
-        # 1. Try opening as a standard image / animated GIF via PIL
+        # 1. Try opening as a standard image / animated GIF via PIL (preserves transparency)
         try:
             pil_img = Image.open(io.BytesIO(content))
             pil_img.seek(0)
-            if pil_img.mode in ("RGBA", "LA") or (pil_img.mode == "P" and "transparency" in pil_img.info):
-                pil_img = pil_img.convert("RGBA")
-                canvas = Image.new("RGBA", pil_img.size, (255, 255, 255, 255))
-                canvas.paste(pil_img, mask=pil_img)
-                img = canvas.convert("RGB")
-            else:
-                img = pil_img.convert("RGB")
+            img = pil_img.convert("RGBA")
         except Exception:
             img = None
 
@@ -103,7 +97,7 @@ def download_and_resize_image(url):
                 nparr = np.frombuffer(content, np.uint8)
                 cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if cv_img is not None:
-                    img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB))
+                    img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)).convert("RGBA")
             except Exception:
                 img = None
 
@@ -111,6 +105,8 @@ def download_and_resize_image(url):
         if img is None:
             ext = os.path.splitext(url.lower().split('?')[0])[1] or '.webm'
             img = extract_frame_from_video(content, ext)
+            if img:
+                img = img.convert("RGBA")
 
         if img:
             resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
@@ -128,12 +124,12 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
     # Try to load background, otherwise create a white one
     try:
         if os.path.exists(BACKGROUND_IMAGE_PATH):
-            background = Image.open(BACKGROUND_IMAGE_PATH)
+            background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
             background = background.resize((total_width, total_height))
         else:
-            background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+            background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
     except Exception:
-        background = Image.new("RGB", (total_width, total_height), (255, 255, 255))
+        background = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
 
     grid_image = background
 
@@ -146,7 +142,8 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
             row, col = divmod(idx, cols)
             x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
             y_offset = row * (IMAGE_HEIGHT_PX + vertical_spacing)
-            grid_image.paste(img, (x_offset, y_offset))
+            # Paste using the image itself as alpha mask to retain transparent corners/borders
+            grid_image.paste(img, (x_offset, y_offset), img)
 
     return grid_image
 
