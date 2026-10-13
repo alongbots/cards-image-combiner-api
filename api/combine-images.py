@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from flask_cors import CORS
 import urllib3
+import time
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -66,55 +67,57 @@ def extract_frame_from_video(video_content, ext=".webm"):
     
     return None
 
-def download_and_resize_image(url):
-    """Download an image or video frame and resize it."""
-    try:
-        # Build headers with domain-specific referer to bypass CDN anti-hotlinking
-        req_headers = HEADERS.copy()
-        if 'mazoku.cc' in url:
-            req_headers['Referer'] = 'https://mazoku.cc/'
-
-        response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
-        if response.status_code == 403:
-            req_headers['Referer'] = 'https://discord.com/'
-            response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
-        response.raise_for_status()
-
-        content = response.content
-        img = None
-
-        # 1. Try opening as a standard image / animated GIF via PIL (preserves transparency)
+def download_and_resize_image(url, max_retries=3):
+    """Download an image or video frame and resize it with retries."""
+    for attempt in range(max_retries):
         try:
-            pil_img = Image.open(io.BytesIO(content))
-            pil_img.seek(0)
-            img = pil_img.convert("RGBA")
-        except Exception:
+            # Build headers with domain-specific referer to bypass CDN anti-hotlinking
+            req_headers = HEADERS.copy()
+            if 'mazoku.cc' in url:
+                req_headers['Referer'] = 'https://mazoku.cc/'
+
+            response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
+            if response.status_code == 403:
+                req_headers['Referer'] = 'https://discord.com/'
+                response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
+            response.raise_for_status()
+
+            content = response.content
             img = None
 
-        # 2. Try decoding with OpenCV if PIL failed
-        if img is None:
+            # 1. Try opening as a standard image / animated GIF via PIL (preserves transparency)
             try:
-                nparr = np.frombuffer(content, np.uint8)
-                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if cv_img is not None:
-                    img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)).convert("RGBA")
+                pil_img = Image.open(io.BytesIO(content))
+                pil_img.seek(0)
+                img = pil_img.convert("RGBA")
             except Exception:
                 img = None
 
-        # 3. Extract as video (handles WebM/MP4 masked as .gif/.png)
-        if img is None:
-            ext = os.path.splitext(url.lower().split('?')[0])[1] or '.webm'
-            img = extract_frame_from_video(content, ext)
-            if img:
-                img = img.convert("RGBA")
+            # 2. Try decoding with OpenCV if PIL failed
+            if img is None:
+                try:
+                    nparr = np.frombuffer(content, np.uint8)
+                    cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if cv_img is not None:
+                        img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)).convert("RGBA")
+                except Exception:
+                    img = None
 
-        if img:
-            resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
-            return resized_img
-            
-    except Exception as e:
-        print(f"Error downloading or processing {url}: {e}")
-        return None
+            # 3. Extract as video (handles WebM/MP4 masked as .gif/.png)
+            if img is None:
+                ext = os.path.splitext(url.lower().split('?')[0])[1] or '.webm'
+                img = extract_frame_from_video(content, ext)
+                if img:
+                    img = img.convert("RGBA")
+
+            if img:
+                resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
+                return resized_img
+                
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed downloading or processing {url}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
     return None
 
 def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spacing):
