@@ -1,5 +1,5 @@
 from flask import Flask, request, send_file
-from PIL import Image
+from PIL import Image, ImageFile
 import requests
 import io
 import tempfile
@@ -10,6 +10,7 @@ from flask_cors import CORS
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = Flask(__name__)
 CORS(app)
@@ -24,66 +25,79 @@ IMAGE_HEIGHT_PX = 756
 
 # Add a realistic Browser Header to bypass blocks
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
 }
 
-def extract_frame_from_video(video_content, ext=".mp4"):
+def extract_frame_from_video(video_content, ext=".webm"):
     """Saves video to a temp file and extracts the first frame."""
-    # Try common video container extensions in case the file type is mismatched
-    for suffix in [ext, ".mp4", ".webm", ".avi", ".mov"]:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
-            temp_video.write(video_content)
-            temp_video_path = temp_video.name
+    # Detect true format via magic bytes
+    if video_content.startswith(b'\x1a\x45\xdf\xa3'):
+        candidates = [".webm", ".mkv", ".mp4"]
+    elif len(video_content) > 8 and video_content[4:8] == b'ftyp':
+        candidates = [".mp4", ".mov", ".m4v"]
+    else:
+        candidates = [ext, ".webm", ".mp4", ".avi", ".mov"]
 
+    for suffix in candidates:
+        temp_video_path = None
         try:
+            # Write and CLOSE the file first so OpenCV can read it freely on Windows
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
+                temp_video.write(video_content)
+                temp_video.flush()
+                temp_video_path = temp_video.name
+
             vidcap = cv2.VideoCapture(temp_video_path)
             success, image = vidcap.read()
             vidcap.release()
             
             if success and image is not None:
-                # Convert BGR (OpenCV) to RGB (PIL)
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 return Image.fromarray(image)
         except Exception as e:
-            print(f"Error processing video frame: {e}")
+            print(f"Error processing video frame ({suffix}): {e}")
         finally:
-            if os.path.exists(temp_video_path):
-                os.remove(temp_video_path)
+            if temp_video_path and os.path.exists(temp_video_path):
+                try:
+                    os.remove(temp_video_path)
+                except Exception:
+                    pass
     
     return None
 
 def download_and_resize_image(url):
     """Download an image or video frame and resize it."""
     try:
-        # Use headers, allow redirects, and disable strict SSL verification to handle any website
-        response = requests.get(url, headers=HEADERS, stream=True, timeout=10, allow_redirects=True, verify=False)
+        # Build headers with domain-specific referer to bypass CDN anti-hotlinking
+        req_headers = HEADERS.copy()
+        if 'mazoku.cc' in url:
+            req_headers['Referer'] = 'https://mazoku.cc/'
+
+        response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
+        if response.status_code == 403:
+            req_headers['Referer'] = 'https://discord.com/'
+            response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
         response.raise_for_status()
-        
-        content_type = response.headers.get('Content-Type', '').lower()
+
         content = response.content
-
-        # Robust check for video formats (excluding GIF which Pillow handles natively)
-        video_extensions = ('.webm', '.mp4', '.mov', '.avi', '.m4v')
-        is_video = 'video' in content_type or url.lower().split('?')[0].endswith(video_extensions)
-
         img = None
-        if is_video:
-            ext = os.path.splitext(url.lower().split('?')[0])[1] or '.mp4'
-            img = extract_frame_from_video(content, ext)
-        
-        # If not a video or video frame extraction failed, try opening as image via PIL
-        if img is None:
-            try:
-                img = Image.open(io.BytesIO(content))
-                if img.mode in ("RGBA", "P"):
-                    img = img.convert("RGB")
-                else:
-                    img = img.convert("RGB")
-            except Exception:
-                img = None
 
-        # Fallback to OpenCV image decoding if PIL fails
+        # 1. Try opening as a standard image / animated GIF via PIL
+        try:
+            pil_img = Image.open(io.BytesIO(content))
+            pil_img.seek(0)
+            if pil_img.mode in ("RGBA", "LA") or (pil_img.mode == "P" and "transparency" in pil_img.info):
+                pil_img = pil_img.convert("RGBA")
+                canvas = Image.new("RGBA", pil_img.size, (255, 255, 255, 255))
+                canvas.paste(pil_img, mask=pil_img)
+                img = canvas.convert("RGB")
+            else:
+                img = pil_img.convert("RGB")
+        except Exception:
+            img = None
+
+        # 2. Try decoding with OpenCV if PIL failed
         if img is None:
             try:
                 nparr = np.frombuffer(content, np.uint8)
@@ -93,9 +107,10 @@ def download_and_resize_image(url):
             except Exception:
                 img = None
 
-        # Fallback to video frame extraction if still None (e.g., video disguised with image extension)
+        # 3. Extract as video (handles WebM/MP4 masked as .gif/.png)
         if img is None:
-            img = extract_frame_from_video(content)
+            ext = os.path.splitext(url.lower().split('?')[0])[1] or '.webm'
+            img = extract_frame_from_video(content, ext)
 
         if img:
             resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
