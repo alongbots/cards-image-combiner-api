@@ -1,13 +1,7 @@
-flask
-
+Flask
 flask-cors
-
 Pillow
-
 requests
-
+numpy
 opencv-python-headless
-
-pillow-heif
-
 urllib3
