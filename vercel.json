@@ -1,8 +1,18 @@
 {
-  "rewrites": [
+  "version": 2,
+  "builds": [
     {
-      "source": "/api/combine-images",
-      "destination": "/api/combine-images.py"
+      "src": "api/combine-images.py",
+      "use": "@vercel/python",
+      "config": {
+        "runtime": "python3.12"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/combine-images",
+      "dest": "/api/combine-images.py"
     }
   ]
 }
