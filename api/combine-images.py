@@ -1,3 +1,4 @@
+
 from flask import Flask, request, send_file
 from PIL import Image, ImageFile
 import requests
@@ -9,6 +10,7 @@ import numpy as np
 from flask_cors import CORS
 import urllib3
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -136,11 +138,14 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
 
     grid_image = background
 
-    for idx, url in enumerate(image_urls):
+    # Download and resize images concurrently
+    with ThreadPoolExecutor(max_workers=min(len(image_urls), 12)) as executor:
+        images = list(executor.map(download_and_resize_image, image_urls))
+
+    for idx, img in enumerate(images):
         if idx >= rows * cols:
             break
         
-        img = download_and_resize_image(url)
         if img:
             row, col = divmod(idx, cols)
             x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
@@ -159,7 +164,7 @@ def combine_images():
         return "No images provided", 400
 
     # Grid logic: you can adjust rows/cols based on len(image_urls)
-    rows, cols = 4, 3 
+    rows, cols = 4, 3
     grid_image = create_image_grid(image_urls, rows, cols, HORIZONTAL_SPACING_PX, VERTICAL_SPACING_PX)
 
     # Save to memory instead of a physical file for faster response
