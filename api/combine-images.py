@@ -1,4 +1,3 @@
-
 from flask import Flask, request, send_file
 from PIL import Image, ImageFile
 import requests
@@ -34,7 +33,6 @@ HEADERS = {
 
 def extract_frame_from_video(video_content, ext=".webm"):
     """Saves video to a temp file and extracts the first frame."""
-    # Detect true format via magic bytes
     if video_content.startswith(b'\x1a\x45\xdf\xa3'):
         candidates = [".webm", ".mkv", ".mp4"]
     elif len(video_content) > 8 and video_content[4:8] == b'ftyp':
@@ -45,7 +43,6 @@ def extract_frame_from_video(video_content, ext=".webm"):
     for suffix in candidates:
         temp_video_path = None
         try:
-            # Write and CLOSE the file first so OpenCV can read it freely on Windows
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_video:
                 temp_video.write(video_content)
                 temp_video.flush()
@@ -54,7 +51,7 @@ def extract_frame_from_video(video_content, ext=".webm"):
             vidcap = cv2.VideoCapture(temp_video_path)
             success, image = vidcap.read()
             vidcap.release()
-            
+
             if success and image is not None:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 return Image.fromarray(image)
@@ -66,28 +63,39 @@ def extract_frame_from_video(video_content, ext=".webm"):
                     os.remove(temp_video_path)
                 except Exception:
                     pass
-    
+
     return None
 
 def download_and_resize_image(url, max_retries=3):
     """Download an image or video frame and resize it with retries."""
     for attempt in range(max_retries):
         try:
-            # Build headers with domain-specific referer to bypass CDN anti-hotlinking
             req_headers = HEADERS.copy()
             if 'mazoku.cc' in url:
                 req_headers['Referer'] = 'https://mazoku.cc/'
 
-            response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
+            response = requests.get(
+                url, headers=req_headers, stream=True,
+                timeout=(3, 5), allow_redirects=True, verify=False
+            )
             if response.status_code == 403:
+                response.close()
                 req_headers['Referer'] = 'https://discord.com/'
-                response = requests.get(url, headers=req_headers, stream=True, timeout=12, allow_redirects=True, verify=False)
+                response = requests.get(
+                    url, headers=req_headers, stream=True,
+                    timeout=(3, 5), allow_redirects=True, verify=False
+                )
+
             response.raise_for_status()
 
-            content = response.content
+            try:
+                content = response.content
+            finally:
+                response.close()
+
             img = None
 
-            # 1. Try opening as a standard image / animated GIF via PIL (preserves transparency)
+            # 1. Try opening as a standard image / animated GIF via PIL
             try:
                 pil_img = Image.open(io.BytesIO(content))
                 pil_img.seek(0)
@@ -101,11 +109,13 @@ def download_and_resize_image(url, max_retries=3):
                     nparr = np.frombuffer(content, np.uint8)
                     cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     if cv_img is not None:
-                        img = Image.fromarray(cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)).convert("RGBA")
+                        img = Image.fromarray(
+                            cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+                        ).convert("RGBA")
                 except Exception:
                     img = None
 
-            # 3. Extract as video (handles WebM/MP4 masked as .gif/.png)
+            # 3. Extract as video
             if img is None:
                 ext = os.path.splitext(url.lower().split('?')[0])[1] or '.webm'
                 img = extract_frame_from_video(content, ext)
@@ -113,20 +123,23 @@ def download_and_resize_image(url, max_retries=3):
                     img = img.convert("RGBA")
 
             if img:
-                resized_img = img.resize((IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX), Image.Resampling.LANCZOS)
+                resized_img = img.resize(
+                    (IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX),
+                    Image.Resampling.BILINEAR
+                )
                 return resized_img
-                
+
         except Exception as e:
             print(f"Attempt {attempt + 1} failed downloading or processing {url}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(1)
+                continue
+
     return None
 
 def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spacing):
     total_width = cols * IMAGE_WIDTH_PX + (cols - 1) * horizontal_spacing
     total_height = rows * IMAGE_HEIGHT_PX + (rows - 1) * vertical_spacing
 
-    # Try to load background, otherwise create a transparent one
     try:
         if os.path.exists(BACKGROUND_IMAGE_PATH):
             background = Image.open(BACKGROUND_IMAGE_PATH).convert("RGBA")
@@ -138,14 +151,14 @@ def create_image_grid(image_urls, rows, cols, horizontal_spacing, vertical_spaci
 
     grid_image = background
 
-    # Download and resize images concurrently
+    # Download and process images concurrently
     with ThreadPoolExecutor(max_workers=min(len(image_urls), 12)) as executor:
         images = list(executor.map(download_and_resize_image, image_urls))
 
     for idx, img in enumerate(images):
         if idx >= rows * cols:
             break
-        
+
         if img:
             row, col = divmod(idx, cols)
             x_offset = col * (IMAGE_WIDTH_PX + horizontal_spacing)
@@ -163,11 +176,12 @@ def combine_images():
     if not image_urls:
         return "No images provided", 400
 
-    # Grid logic: you can adjust rows/cols based on len(image_urls)
     rows, cols = 4, 3
-    grid_image = create_image_grid(image_urls, rows, cols, HORIZONTAL_SPACING_PX, VERTICAL_SPACING_PX)
+    grid_image = create_image_grid(
+        image_urls, rows, cols,
+        HORIZONTAL_SPACING_PX, VERTICAL_SPACING_PX
+    )
 
-    # Save to memory instead of a physical file for faster response
     img_io = io.BytesIO()
     grid_image.save(img_io, 'PNG')
     img_io.seek(0)
